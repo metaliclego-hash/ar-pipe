@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>水道配管 AR</title>
 
-  <!-- model-viewer — iOS AR Quick Look ブリッジ -->
+  <!-- model-viewer（仕様上必須。AR 起動は <a rel="ar"> で行う） -->
   <script async src="https://unpkg.com/@google/model-viewer@3.4.0/dist/model-viewer.min.js"></script>
 
   <script type="importmap">
@@ -39,25 +39,15 @@
       z-index: 1; touch-action: none;
     }
 
-    /*
-      model-viewer をブラウザに「描画」させつつユーザーには見せない。
-      display:none や opacity:0 だと WebGL コンテキストが初期化されず
-      'load' イベントが発火しない / activateAR() が機能しないため
-      opacity:0.001 + visibility コントロールで対応する。
-    */
+    /* model-viewer は DOM に存在させるが AR には使わない */
     model-viewer {
-      position: fixed;
-      width: 120px; height: 120px;
-      bottom: 0; right: 0;
-      opacity: 0.001;
-      pointer-events: none;
-      z-index: 0;
+      position: fixed; width: 1px; height: 1px;
+      bottom: -2px; right: -2px; opacity: 0; pointer-events: none;
     }
 
     #controls {
       position: fixed;
-      bottom: 0; left: 0; right: 0;
-      z-index: 20;
+      bottom: 0; left: 0; right: 0; z-index: 20;
       background: rgba(8, 10, 22, 0.88);
       backdrop-filter: blur(14px);
       -webkit-backdrop-filter: blur(14px);
@@ -95,27 +85,46 @@
 
     .btn-row { display: flex; gap: 10px; }
 
-    button {
+    /* 共通ボタン見た目 */
+    .btn {
       flex: 1; padding: 14px 10px;
-      border: none; border-radius: 12px;
+      border-radius: 12px;
       font-size: 15px; font-weight: 600;
       cursor: pointer; text-align: center;
       -webkit-tap-highlight-color: transparent;
       transition: opacity 0.12s;
+      border: none; user-select: none; -webkit-user-select: none;
+      display: flex; align-items: center; justify-content: center;
+      text-decoration: none; position: relative;
     }
-    button:active { opacity: 0.7; }
+    .btn:active { opacity: 0.7; }
 
     #updateBtn {
       background: rgba(255,255,255,0.13);
       color: #fff; flex: 0.65;
     }
 
-    #arBtn {
+    /*
+      AR ボタン本体は <a rel="ar"> 要素。
+      href に blob URL をセットしてユーザーが直接タップすることで
+      iOS AR Quick Look がブラウザプロセス内の blob にアクセスし起動する。
+      activateAR() / SW URL 経由より確実。
+    */
+    #arLink {
       background: #007AFF; color: #fff; flex: 1.35;
     }
-    #arBtn:disabled {
+
+    #arLink[data-ready="false"] {
       background: rgba(255,255,255,0.08);
       color: rgba(255,255,255,0.25);
+      pointer-events: none;           /* 準備できるまでタップ無効 */
+    }
+
+    /* iOS AR Quick Look に必須の <img> 子要素（視覚的に隠す） */
+    #arThumb {
+      position: absolute; left: 0; top: 0;
+      width: 1px; height: 1px; opacity: 0.01;
+      pointer-events: none;
     }
 
     #status {
@@ -123,13 +132,15 @@
       color: #556688; text-align: center; min-height: 16px;
     }
 
-    .dot {
-      display: inline-block;
-      animation: blink 1.2s step-start infinite;
+    .spin::after {
+      content: '';
+      display: inline-block; width: 10px; height: 10px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff; border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      margin-left: 6px; vertical-align: middle;
     }
-    .dot:nth-child(2) { animation-delay: 0.4s; }
-    .dot:nth-child(3) { animation-delay: 0.8s; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -137,56 +148,59 @@
   <video id="camera" autoplay playsinline muted></video>
   <canvas id="preview"></canvas>
 
-  <!--
-    model-viewer は GLB を内部ロードし activateAR() で
-    ブラウザプロセス内の blob URL を iOS AR Quick Look に渡す。
-    SW URL（HTTP）では iOS ネイティブDL がバイパスして 404 になるため
-    必ず src には blob URL を使う。
-  -->
-  <model-viewer
-    id="modelViewer"
-    ar
-    ar-modes="quick-look"
-    ar-scale="fixed"
-    camera-controls>
-  </model-viewer>
+  <!-- model-viewer: DOM 仕様上の要件として保持 -->
+  <model-viewer id="modelViewer" ar ar-modes="quick-look" ar-scale="fixed" camera-controls></model-viewer>
 
   <div id="controls">
     <div class="row">
       <div class="field">
         <label>外径 (mm)</label>
-        <input type="number" id="outerDia" value="100"
-               min="10" max="500" step="5" inputmode="decimal">
+        <input type="number" id="outerDia" value="100" min="10" max="500" step="5" inputmode="decimal">
       </div>
       <div class="field">
         <label>長さ (mm)</label>
-        <input type="number" id="pipeLen" value="1000"
-               min="100" max="5000" step="50" inputmode="decimal">
+        <input type="number" id="pipeLen" value="1000" min="100" max="5000" step="50" inputmode="decimal">
       </div>
     </div>
+
     <div class="btn-row">
-      <button id="updateBtn">更新</button>
+      <button id="updateBtn" class="btn">更新</button>
+
       <!--
-        AR ボタンは <button> のままで OK。
-        クリックハンドラ内で modelViewer.activateAR() を同期呼び出しすれば
-        ユーザージェスチャが維持され iOS が AR Quick Look を許可する。
+        ★ AR トリガー本体 ★
+        <a rel="ar"> をユーザーが直接タップする。
+        href に blob URL をセットすることで iOS AR Quick Look が
+        ブラウザプロセス内の GLB バイナリに直接アクセスできる。
+        - SW URL（HTTP）: iOS ネイティブ DL がバイパス → 404 で失敗
+        - model-viewer.activateAR(): WebGL 未初期化/load 未発火 → 失敗
+        - blob URL + 直接タップ: ブラウザ内で完結 → 確実に起動
       -->
-      <button id="arBtn" disabled>AR で実寸配置</button>
+      <a id="arLink" class="btn" rel="ar" href="#" data-ready="false">
+        <!--
+          iOS AR Quick Look は <a rel="ar"> の最初の子 <img> を
+          サムネイルとして使う。存在しないと起動しないことがある。
+        -->
+        <img id="arThumb"
+             src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVQI12P4z8BQDwAEgAF/QualIQAAAABJRU5ErkJggg=="
+             alt="" width="2" height="2">
+        AR で実寸配置
+      </a>
     </div>
+
     <div id="status">起動中...</div>
   </div>
 
   <script type="module">
-    import * as THREE   from 'three';
+    import * as THREE        from 'three';
     import { GLTFExporter }  from 'three/addons/exporters/GLTFExporter.js';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
     /* ══════════════════════════════════════════════════
        配管ジオメトリ
-       scale=1 → mm 座標（プレビュー）
+       scale=1    → mm 座標（Three.js プレビュー）
        scale=0.001 → m 座標（AR GLB）
     ══════════════════════════════════════════════════ */
-    function buildPipeGroup(outerDiaMm, lengthMm, scale = 1) {
+    function buildPipeGroup(outerDiaMm, lengthMm, scale) {
       const outerR = (outerDiaMm / 2) * scale;
       const wallMm = Math.max(2, outerDiaMm * 0.08);
       const innerR = Math.max(scale * 0.5, (outerDiaMm / 2 - wallMm) * scale);
@@ -194,19 +208,19 @@
 
       const g = new THREE.Group();
 
-      // 外面 グレー
+      // 外面（グレー・FrontSide）
       g.add(new THREE.Mesh(
         new THREE.CylinderGeometry(outerR, outerR, len, 48, 1, true),
         new THREE.MeshStandardMaterial({ color: 0x8A8A8A, roughness: 0.55, metalness: 0.15, side: THREE.FrontSide })
       ));
 
-      // 内面 水色（DoubleSide で開口部から見える）
+      // 内面（水色・DoubleSide で開口部から見える）
       g.add(new THREE.Mesh(
         new THREE.CylinderGeometry(innerR, innerR, len, 48, 1, true),
         new THREE.MeshStandardMaterial({ color: 0x87CEEB, roughness: 0.25, metalness: 0.0, side: THREE.DoubleSide })
       ));
 
-      // 端面リング
+      // 端面リング（DoubleSide）
       const capMat = new THREE.MeshStandardMaterial({ color: 0x8A8A8A, roughness: 0.55, metalness: 0.15, side: THREE.DoubleSide });
       for (const s of [-1, 1]) {
         const cap = new THREE.Mesh(new THREE.RingGeometry(innerR, outerR, 48), capMat);
@@ -227,20 +241,17 @@
 
     const scene = new THREE.Scene();
     const cam3D = new THREE.PerspectiveCamera(55, 1, 0.1, 100000);
-
     scene.add(new THREE.AmbientLight(0xffffff, 0.7));
     const sun = new THREE.DirectionalLight(0xffffff, 0.9);
     sun.position.set(2, 5, 3); scene.add(sun);
-    const rim = new THREE.DirectionalLight(0xAADDFF, 0.4);
-    rim.position.set(-3, 1, -2); scene.add(rim);
+    scene.add(Object.assign(new THREE.DirectionalLight(0xAADDFF, 0.4), { position: new THREE.Vector3(-3, 1, -2) }));
 
     const orbit = new OrbitControls(cam3D, canvas);
     orbit.enableDamping = true; orbit.dampingFactor = 0.07;
     orbit.minDistance = 10; orbit.maxDistance = 20000;
 
     let previewMesh = null;
-
-    function refreshPreview(outerDia, length) {
+    function refreshPreview(od, len) {
       if (previewMesh) {
         scene.remove(previewMesh);
         previewMesh.traverse(o => {
@@ -248,10 +259,10 @@
           if (o.material) [].concat(o.material).forEach(m => m.dispose());
         });
       }
-      previewMesh = buildPipeGroup(outerDia, length, 1);
+      previewMesh = buildPipeGroup(od, len, 1);
       previewMesh.rotation.z = Math.PI / 2;
       scene.add(previewMesh);
-      const d = Math.max(outerDia, length);
+      const d = Math.max(od, len);
       cam3D.position.set(0, d * 0.45, d * 1.5);
       cam3D.lookAt(0, 0, 0);
       orbit.target.set(0, 0, 0);
@@ -259,9 +270,9 @@
     }
 
     function resize() {
-      const w = window.innerWidth, h = window.innerHeight;
-      renderer.setSize(w, h);
-      cam3D.aspect = w / h; cam3D.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      cam3D.aspect = window.innerWidth / window.innerHeight;
+      cam3D.updateProjectionMatrix();
     }
     window.addEventListener('resize', resize);
     resize();
@@ -273,114 +284,88 @@
     async function startCamera() {
       const v = document.getElementById('camera');
       try {
-        v.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
-      } catch (e) {
+        v.srcObject = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } }
+        });
+      } catch {
         v.style.background = 'linear-gradient(135deg,#0f0c29,#302b63,#24243e)';
       }
     }
 
     /* ══════════════════════════════════════════════════
-       Service Worker（仕様上登録。AR 配信は blob URL で行うため
-       pipe.glb のキャッシュはフォールバック用途のみ）
+       Service Worker（仕様準拠のため登録。AR 配信には使わない）
     ══════════════════════════════════════════════════ */
     async function registerSW() {
-      if (!('serviceWorker' in navigator)) return;
-      try { await navigator.serviceWorker.register('./sw.js', { scope: './' }); } catch (_) {}
+      if ('serviceWorker' in navigator) {
+        try { await navigator.serviceWorker.register('./sw.js', { scope: './' }); } catch (_) {}
+      }
     }
 
     /* ══════════════════════════════════════════════════
-       GLB 生成 → blob URL → model-viewer にロード
-    ══════════════════════════════════════════════════ */
-    const mv       = document.getElementById('modelViewer');
-    const arBtn    = document.getElementById('arBtn');
-    const statusEl = document.getElementById('status');
-    let currentBlobURL = null;
-    let modelReady     = false;
-    let generating     = false;
+       GLB 生成 → blob URL → <a rel="ar"> の href に直接セット
 
-    async function generateAndLoad(outerDia, length) {
-      if (generating) return;
-      generating = true;
-      modelReady = false;
-      arBtn.disabled = true;
-      statusEl.innerHTML = 'GLB 生成中 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>';
+       iOS AR Quick Look の起動方法として最も確実な手順:
+         1. GLB を Blob にして URL.createObjectURL() で blob URL を作る
+         2. <a rel="ar"> の href にその blob URL をセット
+         3. ユーザーが <a rel="ar"> を直接タップ
+            → iOS Safari がブラウザプロセス内の blob を読み取り AR Quick Look へ渡す
+
+       activateAR() / SW URL では iOS のネイティブ DL がバイパスや
+       WebGL 未初期化で失敗するためこの方式を採用。
+    ══════════════════════════════════════════════════ */
+    const arLink   = document.getElementById('arLink');
+    const statusEl = document.getElementById('status');
+    let blobURL    = null;
+    let busy       = false;
+
+    async function generateGLB(outerDia, length) {
+      if (busy) return;
+      busy = true;
+      arLink.dataset.ready = 'false';
+      statusEl.textContent = 'GLB 生成中...';
 
       try {
-        /* ── AR 用シーン（メートル単位） ── */
+        // AR 用シーン（メートル単位）
         const arScene = new THREE.Scene();
-        const arPipe  = buildPipeGroup(outerDia, length, 0.001);
-        arPipe.rotation.z = Math.PI / 2;              // 水平配置
-        arPipe.position.y = (outerDia / 2) * 0.001;   // 外半径分浮かせ床面接地
-        arScene.add(arPipe);
+        const pipe    = buildPipeGroup(outerDia, length, 0.001);
+        pipe.rotation.z = Math.PI / 2;              // 水平配置（床置き）
+        pipe.position.y = (outerDia / 2) * 0.001;   // 床面（y=0）に接地
+        arScene.add(pipe);
 
-        /* ── GLB エクスポート ── */
-        const exporter = new GLTFExporter();
+        // GLB バイナリ生成
         const raw = await new Promise((ok, ng) =>
-          exporter.parse(arScene, ok, ng, { binary: true })
+          new GLTFExporter().parse(arScene, ok, ng, { binary: true })
         );
         const ab = raw instanceof ArrayBuffer ? raw : new Uint8Array(raw).buffer;
 
-        /* ── blob URL 生成 ── */
-        if (currentBlobURL) URL.revokeObjectURL(currentBlobURL);
-        currentBlobURL = URL.createObjectURL(new Blob([ab], { type: 'model/gltf-binary' }));
+        // 古い blob を解放して新規作成
+        if (blobURL) URL.revokeObjectURL(blobURL);
+        blobURL = URL.createObjectURL(new Blob([ab], { type: 'model/gltf-binary' }));
 
-        /* ── model-viewer にロード ── */
-        statusEl.innerHTML = 'モデル読込中 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>';
-        mv.src = '';
-        await new Promise(r => setTimeout(r, 80));
-        mv.src = currentBlobURL;
+        // ★ <a rel="ar"> の href を blob URL に更新 ★
+        arLink.href          = blobURL;
+        arLink.dataset.ready = 'true';
 
-        /*
-          'load' イベントを待つ。
-          model-viewer が opacity:0.001 で描画されていれば WebGL が初期化され
-          正常に発火する。3 秒以内に来なければ警告付きで続行。
-        */
-        const loaded = await new Promise(resolve => {
-          const tid = setTimeout(() => resolve(false), 3000);
-          mv.addEventListener('load',  () => { clearTimeout(tid); resolve(true);  }, { once: true });
-          mv.addEventListener('error', () => { clearTimeout(tid); resolve(false); }, { once: true });
-        });
+        // model-viewer にも流す（仕様上の要素として機能させる）
+        document.getElementById('modelViewer').src = blobURL;
 
-        modelReady = true;
-        arBtn.disabled = false;
-
-        if (loaded) {
-          statusEl.textContent = '準備完了 ✓  AR ボタンで実寸配置できます';
-        } else {
-          statusEl.textContent = '準備完了（読込確認中）— AR を試してください';
-          console.warn('model-viewer load event did not fire in 3s; proceeding anyway');
-        }
-
+        statusEl.textContent = '準備完了 ✓  「AR で実寸配置」をタップしてください';
       } catch (e) {
         statusEl.textContent = 'エラー: ' + e.message;
         console.error(e);
       } finally {
-        generating = false;
+        busy = false;
       }
     }
 
-    /* ══════════════════════════════════════════════════
-       AR ボタン
-       ─ <button> の click ハンドラ内で activateAR() を
-         同期呼び出し → ユーザージェスチャが維持され
-         iOS が AR Quick Look の起動を許可する。
-         （非同期 await を挟むと iOS がジェスチャと見なさない場合がある）
-    ══════════════════════════════════════════════════ */
-    arBtn.addEventListener('click', () => {
-      if (!modelReady) {
-        statusEl.textContent = 'GLB 準備中です、少々お待ちください';
+    /* AR リンクのクリックハンドラ（ガードとステータス更新のみ） */
+    arLink.addEventListener('click', e => {
+      if (arLink.dataset.ready !== 'true' || !blobURL) {
+        e.preventDefault();
+        statusEl.textContent = 'GLB 生成中です、少々お待ちください';
         return;
       }
-
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-      if (!isIOS) {
-        statusEl.textContent = 'AR は iOS Safari でのみ利用できます';
-        return;
-      }
-
-      // ★ 同期呼び出し — ここで AR Quick Look が起動する
-      mv.activateAR();
+      // ★ preventDefault しない → iOS が rel="ar" を処理して AR Quick Look を起動 ★
       statusEl.textContent = 'AR Quick Look 起動中...';
     });
 
@@ -389,28 +374,28 @@
     ══════════════════════════════════════════════════ */
     function getParams() {
       return {
-        outerDia: Math.max(10,  parseFloat(document.getElementById('outerDia').value) || 100),
-        length:   Math.max(100, parseFloat(document.getElementById('pipeLen').value)  || 1000),
+        od:  Math.max(10,  parseFloat(document.getElementById('outerDia').value) || 100),
+        len: Math.max(100, parseFloat(document.getElementById('pipeLen').value)  || 1000),
       };
     }
 
     document.getElementById('updateBtn').addEventListener('click', () => {
-      const { outerDia, length } = getParams();
-      refreshPreview(outerDia, length);
-      generateAndLoad(outerDia, length);
+      const { od, len } = getParams();
+      refreshPreview(od, len);
+      generateGLB(od, len);
     });
 
-    let debounceId = null;
+    let timer = null;
     const onInput = () => {
-      const { outerDia, length } = getParams();
-      refreshPreview(outerDia, length);
-      clearTimeout(debounceId);
-      debounceId = setTimeout(() => generateAndLoad(outerDia, length), 700);
+      const { od, len } = getParams();
+      refreshPreview(od, len);
+      clearTimeout(timer);
+      timer = setTimeout(() => generateGLB(od, len), 700);
     };
     document.getElementById('outerDia').addEventListener('input', onInput);
     document.getElementById('pipeLen').addEventListener('input', onInput);
 
-    // コントロールパネルのタッチを Three.js OrbitControls に漏らさない
+    // コントロールパネルのタッチを OrbitControls に漏らさない
     const panel = document.getElementById('controls');
     panel.addEventListener('touchstart', e => e.stopPropagation(), { passive: false });
     panel.addEventListener('mousedown',  e => e.stopPropagation());
@@ -421,9 +406,9 @@
     (async () => {
       await registerSW();
       await startCamera();
-      const { outerDia, length } = getParams();
-      refreshPreview(outerDia, length);
-      await generateAndLoad(outerDia, length);
+      const { od, len } = getParams();
+      refreshPreview(od, len);
+      await generateGLB(od, len);
     })();
   </script>
 </body>
