@@ -8,7 +8,6 @@
   <!-- model-viewer — iOS AR Quick Look ブリッジ -->
   <script async src="https://unpkg.com/@google/model-viewer@3.4.0/dist/model-viewer.min.js"></script>
 
-  <!-- Three.js v0.160.0 importmap -->
   <script type="importmap">
   {
     "imports": {
@@ -28,31 +27,33 @@
       font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans', sans-serif;
     }
 
-    /* カメラ映像背景 */
     #camera {
       position: fixed; inset: 0;
       width: 100%; height: 100%;
-      object-fit: cover;
-      z-index: 0;
+      object-fit: cover; z-index: 0;
     }
 
-    /* Three.js プレビューキャンバス */
     #preview {
       position: fixed; inset: 0;
       width: 100%; height: 100%;
-      z-index: 1;
-      touch-action: none;
+      z-index: 1; touch-action: none;
     }
 
-    /* model-viewer — 仕様上 DOM に含めるが視覚的に非表示 */
+    /*
+      model-viewer をブラウザに「描画」させつつユーザーには見せない。
+      display:none や opacity:0 だと WebGL コンテキストが初期化されず
+      'load' イベントが発火しない / activateAR() が機能しないため
+      opacity:0.001 + visibility コントロールで対応する。
+    */
     model-viewer {
       position: fixed;
-      width: 1px; height: 1px;
+      width: 120px; height: 120px;
       bottom: 0; right: 0;
-      opacity: 0; pointer-events: none; overflow: hidden;
+      opacity: 0.001;
+      pointer-events: none;
+      z-index: 0;
     }
 
-    /* コントロールパネル */
     #controls {
       position: fixed;
       bottom: 0; left: 0; right: 0;
@@ -68,8 +69,7 @@
 
     .row {
       display: flex; gap: 12px;
-      margin-bottom: 14px;
-      align-items: flex-end;
+      margin-bottom: 14px; align-items: flex-end;
     }
 
     .field { flex: 1; display: flex; flex-direction: column; gap: 5px; }
@@ -95,67 +95,59 @@
 
     .btn-row { display: flex; gap: 10px; }
 
-    /* 共通ボタン見た目 */
-    .btn {
+    button {
       flex: 1; padding: 14px 10px;
       border: none; border-radius: 12px;
       font-size: 15px; font-weight: 600;
       cursor: pointer; text-align: center;
       -webkit-tap-highlight-color: transparent;
       transition: opacity 0.12s;
-      text-decoration: none;
-      display: flex; align-items: center; justify-content: center;
-      user-select: none; -webkit-user-select: none;
     }
-    .btn:active { opacity: 0.7; }
+    button:active { opacity: 0.7; }
 
     #updateBtn {
       background: rgba(255,255,255,0.13);
       color: #fff; flex: 0.65;
     }
 
-    /* AR ボタン = <a rel="ar"> ─ ユーザーが直接タップするので
-       非同期処理を挟まずジェスチャが維持される */
     #arBtn {
       background: #007AFF; color: #fff; flex: 1.35;
-      position: relative;
     }
-
-    #arBtn[data-disabled="true"] {
+    #arBtn:disabled {
       background: rgba(255,255,255,0.08);
       color: rgba(255,255,255,0.25);
-      pointer-events: none;
-    }
-
-    /* iOS AR Quick Look に必須の <img> 子要素（視覚的に隠す） */
-    #arThumb {
-      position: absolute;
-      width: 0; height: 0;
-      opacity: 0; pointer-events: none;
     }
 
     #status {
       margin-top: 10px; font-size: 12px;
       color: #556688; text-align: center; min-height: 16px;
     }
+
+    .dot {
+      display: inline-block;
+      animation: blink 1.2s step-start infinite;
+    }
+    .dot:nth-child(2) { animation-delay: 0.4s; }
+    .dot:nth-child(3) { animation-delay: 0.8s; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
   </style>
 </head>
 <body>
 
-  <!-- デバイスカメラ映像 -->
   <video id="camera" autoplay playsinline muted></video>
-
-  <!-- Three.js 3D プレビュー -->
   <canvas id="preview"></canvas>
 
   <!--
-    model-viewer: iOS AR Quick Look を GLB で使うための仕様上必須要素。
-    実際の AR 起動は下の <a rel="ar"> で行う（model-viewer.activateAR() は
-    element が非表示だと 'load' イベントが発火しないため使わない）。
+    model-viewer は GLB を内部ロードし activateAR() で
+    ブラウザプロセス内の blob URL を iOS AR Quick Look に渡す。
+    SW URL（HTTP）では iOS ネイティブDL がバイパスして 404 になるため
+    必ず src には blob URL を使う。
   -->
   <model-viewer
     id="modelViewer"
-    ar ar-modes="quick-look" ar-scale="fixed"
+    ar
+    ar-modes="quick-look"
+    ar-scale="fixed"
     camera-controls>
   </model-viewer>
 
@@ -172,25 +164,15 @@
                min="100" max="5000" step="50" inputmode="decimal">
       </div>
     </div>
-
     <div class="btn-row">
-      <button id="updateBtn" class="btn">更新</button>
-
+      <button id="updateBtn">更新</button>
       <!--
-        <a rel="ar"> = iOS AR Quick Look のネイティブトリガー。
-        ユーザーが直接タップするので非同期待ちなしでジェスチャが通る。
-        <img> 子要素は iOS の仕様上必須（サムネイル用）。
+        AR ボタンは <button> のままで OK。
+        クリックハンドラ内で modelViewer.activateAR() を同期呼び出しすれば
+        ユーザージェスチャが維持され iOS が AR Quick Look を許可する。
       -->
-      <a id="arBtn" class="btn"
-         rel="ar" href="./pipe.glb"
-         data-disabled="true">
-        <img id="arThumb"
-             src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAABjE+ibYAAAAASUVORK5CYII="
-             alt="" aria-hidden="true">
-        AR で実寸配置
-      </a>
+      <button id="arBtn" disabled>AR で実寸配置</button>
     </div>
-
     <div id="status">起動中...</div>
   </div>
 
@@ -200,78 +182,39 @@
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
     /* ══════════════════════════════════════════════════
-       Service Worker
-    ══════════════════════════════════════════════════ */
-    let swReady = false;
-
-    async function registerSW() {
-      if (!('serviceWorker' in navigator)) return false;
-      try {
-        await navigator.serviceWorker.register('./sw.js', { scope: './' });
-        await navigator.serviceWorker.ready;
-        // clients.claim() が完了するまで controller が null のことがある
-        if (!navigator.serviceWorker.controller) {
-          await new Promise(resolve => {
-            navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true });
-            setTimeout(resolve, 3000); // フォールバック
-          });
-        }
-        return !!navigator.serviceWorker.controller;
-      } catch (e) {
-        console.error('SW:', e);
-        return false;
-      }
-    }
-
-    function sendGLBtoSW(buffer) {
-      return new Promise((resolve, reject) => {
-        if (!navigator.serviceWorker.controller) { reject(new Error('no SW controller')); return; }
-        const { port1, port2 } = new MessageChannel();
-        port1.onmessage = e => (e.data.ok ? resolve() : reject(new Error('SW store failed')));
-        navigator.serviceWorker.controller.postMessage(
-          { type: 'STORE_GLB', buffer },
-          [port2, buffer]          // buffer を転送（ゼロコピー）
-        );
-      });
-    }
-
-    /* ══════════════════════════════════════════════════
        配管ジオメトリ
-       scale = 1     → mm 座標（Three.js プレビュー用）
-       scale = 0.001 → m 座標（AR GLB 用）
+       scale=1 → mm 座標（プレビュー）
+       scale=0.001 → m 座標（AR GLB）
     ══════════════════════════════════════════════════ */
     function buildPipeGroup(outerDiaMm, lengthMm, scale = 1) {
       const outerR = (outerDiaMm / 2) * scale;
-      const wallMm = Math.max(2, outerDiaMm * 0.08);          // 肉厚 最小 2mm
+      const wallMm = Math.max(2, outerDiaMm * 0.08);
       const innerR = Math.max(scale * 0.5, (outerDiaMm / 2 - wallMm) * scale);
       const len    = lengthMm * scale;
 
-      const group = new THREE.Group();
+      const g = new THREE.Group();
 
-      // ── 外面（グレー・FrontSide）
-      const outerGeo = new THREE.CylinderGeometry(outerR, outerR, len, 48, 1, true);
-      group.add(new THREE.Mesh(outerGeo, new THREE.MeshStandardMaterial({
-        color: 0x8A8A8A, roughness: 0.55, metalness: 0.15, side: THREE.FrontSide,
-      })));
+      // 外面 グレー
+      g.add(new THREE.Mesh(
+        new THREE.CylinderGeometry(outerR, outerR, len, 48, 1, true),
+        new THREE.MeshStandardMaterial({ color: 0x8A8A8A, roughness: 0.55, metalness: 0.15, side: THREE.FrontSide })
+      ));
 
-      // ── 内面（水色・DoubleSide で開口部から見える）
-      const innerGeo = new THREE.CylinderGeometry(innerR, innerR, len, 48, 1, true);
-      group.add(new THREE.Mesh(innerGeo, new THREE.MeshStandardMaterial({
-        color: 0x87CEEB, roughness: 0.25, metalness: 0.0, side: THREE.DoubleSide,
-      })));
+      // 内面 水色（DoubleSide で開口部から見える）
+      g.add(new THREE.Mesh(
+        new THREE.CylinderGeometry(innerR, innerR, len, 48, 1, true),
+        new THREE.MeshStandardMaterial({ color: 0x87CEEB, roughness: 0.25, metalness: 0.0, side: THREE.DoubleSide })
+      ));
 
-      // ── 端面リング（環状・DoubleSide）
-      const capMat = new THREE.MeshStandardMaterial({
-        color: 0x8A8A8A, roughness: 0.55, metalness: 0.15, side: THREE.DoubleSide,
-      });
-      for (const sign of [-1, 1]) {
+      // 端面リング
+      const capMat = new THREE.MeshStandardMaterial({ color: 0x8A8A8A, roughness: 0.55, metalness: 0.15, side: THREE.DoubleSide });
+      for (const s of [-1, 1]) {
         const cap = new THREE.Mesh(new THREE.RingGeometry(innerR, outerR, 48), capMat);
         cap.rotation.x = Math.PI / 2;
-        cap.position.y = sign * len / 2;
-        group.add(cap);
+        cap.position.y = s * len / 2;
+        g.add(cap);
       }
-
-      return group;
+      return g;
     }
 
     /* ══════════════════════════════════════════════════
@@ -282,8 +225,8 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-    const scene  = new THREE.Scene();
-    const cam3D  = new THREE.PerspectiveCamera(55, 1, 0.1, 100000);
+    const scene = new THREE.Scene();
+    const cam3D = new THREE.PerspectiveCamera(55, 1, 0.1, 100000);
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.7));
     const sun = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -305,11 +248,9 @@
           if (o.material) [].concat(o.material).forEach(m => m.dispose());
         });
       }
-      previewMesh = buildPipeGroup(outerDia, length, 1); // mm スケール
-      previewMesh.rotation.z = Math.PI / 2;              // 水平配置
+      previewMesh = buildPipeGroup(outerDia, length, 1);
+      previewMesh.rotation.z = Math.PI / 2;
       scene.add(previewMesh);
-
-      // カメラをパイプサイズに合わせてリセット
       const d = Math.max(outerDia, length);
       cam3D.position.set(0, d * 0.45, d * 1.5);
       cam3D.lookAt(0, 0, 0);
@@ -320,76 +261,128 @@
     function resize() {
       const w = window.innerWidth, h = window.innerHeight;
       renderer.setSize(w, h);
-      cam3D.aspect = w / h;
-      cam3D.updateProjectionMatrix();
+      cam3D.aspect = w / h; cam3D.updateProjectionMatrix();
     }
     window.addEventListener('resize', resize);
     resize();
-
     (function loop() { requestAnimationFrame(loop); orbit.update(); renderer.render(scene, cam3D); })();
 
     /* ══════════════════════════════════════════════════
-       デバイスカメラ（背景映像）
+       デバイスカメラ
     ══════════════════════════════════════════════════ */
     async function startCamera() {
-      const video = document.getElementById('camera');
+      const v = document.getElementById('camera');
       try {
-        video.srcObject = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } },
-        });
+        v.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
       } catch (e) {
-        console.warn('Camera:', e.message);
-        video.style.background = 'linear-gradient(135deg,#0f0c29,#302b63,#24243e)';
+        v.style.background = 'linear-gradient(135deg,#0f0c29,#302b63,#24243e)';
       }
     }
 
     /* ══════════════════════════════════════════════════
-       GLB 生成 & SW キャッシュ
-       ─ 「更新」ボタン押下・入力変更時に呼ぶ。
-       ─ AR ボタンタップ前に完了しておくことで
-         <a rel="ar"> の直接クリックが成立する。
+       Service Worker（仕様上登録。AR 配信は blob URL で行うため
+       pipe.glb のキャッシュはフォールバック用途のみ）
     ══════════════════════════════════════════════════ */
+    async function registerSW() {
+      if (!('serviceWorker' in navigator)) return;
+      try { await navigator.serviceWorker.register('./sw.js', { scope: './' }); } catch (_) {}
+    }
+
+    /* ══════════════════════════════════════════════════
+       GLB 生成 → blob URL → model-viewer にロード
+    ══════════════════════════════════════════════════ */
+    const mv       = document.getElementById('modelViewer');
     const arBtn    = document.getElementById('arBtn');
     const statusEl = document.getElementById('status');
-    let glbReady   = false;
-    let generating = false;
+    let currentBlobURL = null;
+    let modelReady     = false;
+    let generating     = false;
 
-    async function generateAndCache(outerDia, length) {
-      if (!swReady || generating) return;
+    async function generateAndLoad(outerDia, length) {
+      if (generating) return;
       generating = true;
-      statusEl.textContent = 'GLB 生成中...';
+      modelReady = false;
+      arBtn.disabled = true;
+      statusEl.innerHTML = 'GLB 生成中 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>';
 
       try {
-        // AR シーン（メートル単位）
+        /* ── AR 用シーン（メートル単位） ── */
         const arScene = new THREE.Scene();
         const arPipe  = buildPipeGroup(outerDia, length, 0.001);
-        arPipe.rotation.z = Math.PI / 2;          // 水平（床置き）
-        arPipe.position.y = (outerDia / 2) * 0.001; // 外半径分だけ浮かせて床面に接地
+        arPipe.rotation.z = Math.PI / 2;              // 水平配置
+        arPipe.position.y = (outerDia / 2) * 0.001;   // 外半径分浮かせ床面接地
         arScene.add(arPipe);
 
+        /* ── GLB エクスポート ── */
         const exporter = new GLTFExporter();
-        const raw = await new Promise((resolve, reject) =>
-          exporter.parse(arScene, resolve, reject, { binary: true })
+        const raw = await new Promise((ok, ng) =>
+          exporter.parse(arScene, ok, ng, { binary: true })
         );
+        const ab = raw instanceof ArrayBuffer ? raw : new Uint8Array(raw).buffer;
 
-        // GLTFExporter は ArrayBuffer を返すが念のため正規化
-        const ab = raw instanceof ArrayBuffer ? raw.slice(0) : new Uint8Array(raw).buffer.slice(0);
+        /* ── blob URL 生成 ── */
+        if (currentBlobURL) URL.revokeObjectURL(currentBlobURL);
+        currentBlobURL = URL.createObjectURL(new Blob([ab], { type: 'model/gltf-binary' }));
 
-        await sendGLBtoSW(ab);
+        /* ── model-viewer にロード ── */
+        statusEl.innerHTML = 'モデル読込中 <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>';
+        mv.src = '';
+        await new Promise(r => setTimeout(r, 80));
+        mv.src = currentBlobURL;
 
-        // model-viewer の src も更新（仕様上の要素として機能させる）
-        document.getElementById('modelViewer').src = `./pipe.glb?t=${Date.now()}`;
+        /*
+          'load' イベントを待つ。
+          model-viewer が opacity:0.001 で描画されていれば WebGL が初期化され
+          正常に発火する。3 秒以内に来なければ警告付きで続行。
+        */
+        const loaded = await new Promise(resolve => {
+          const tid = setTimeout(() => resolve(false), 3000);
+          mv.addEventListener('load',  () => { clearTimeout(tid); resolve(true);  }, { once: true });
+          mv.addEventListener('error', () => { clearTimeout(tid); resolve(false); }, { once: true });
+        });
 
-        glbReady = true;
-        arBtn.dataset.disabled = 'false';
-        statusEl.textContent = 'GLB 準備完了 — AR ボタンで実寸配置';
+        modelReady = true;
+        arBtn.disabled = false;
+
+        if (loaded) {
+          statusEl.textContent = '準備完了 ✓  AR ボタンで実寸配置できます';
+        } else {
+          statusEl.textContent = '準備完了（読込確認中）— AR を試してください';
+          console.warn('model-viewer load event did not fire in 3s; proceeding anyway');
+        }
+
       } catch (e) {
-        statusEl.textContent = 'GLB 生成エラー: ' + e.message;
+        statusEl.textContent = 'エラー: ' + e.message;
         console.error(e);
       } finally {
         generating = false;
       }
     }
+
+    /* ══════════════════════════════════════════════════
+       AR ボタン
+       ─ <button> の click ハンドラ内で activateAR() を
+         同期呼び出し → ユーザージェスチャが維持され
+         iOS が AR Quick Look の起動を許可する。
+         （非同期 await を挟むと iOS がジェスチャと見なさない場合がある）
+    ══════════════════════════════════════════════════ */
+    arBtn.addEventListener('click', () => {
+      if (!modelReady) {
+        statusEl.textContent = 'GLB 準備中です、少々お待ちください';
+        return;
+      }
+
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (!isIOS) {
+        statusEl.textContent = 'AR は iOS Safari でのみ利用できます';
+        return;
+      }
+
+      // ★ 同期呼び出し — ここで AR Quick Look が起動する
+      mv.activateAR();
+      statusEl.textContent = 'AR Quick Look 起動中...';
+    });
 
     /* ══════════════════════════════════════════════════
        UI イベント
@@ -401,69 +394,36 @@
       };
     }
 
-    async function updateAll() {
+    document.getElementById('updateBtn').addEventListener('click', () => {
       const { outerDia, length } = getParams();
       refreshPreview(outerDia, length);
-      await generateAndCache(outerDia, length);
-    }
-
-    // AR ボタン（<a rel="ar">）クリック時のガード
-    arBtn.addEventListener('click', e => {
-      if (arBtn.dataset.disabled === 'true') { e.preventDefault(); return; }
-
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-      if (!isIOS) {
-        e.preventDefault();
-        statusEl.textContent = 'AR は iOS Safari でのみ利用できます';
-        return;
-      }
-      // iOS かつ GLB 準備完了 → デフォルト動作（AR Quick Look 起動）をそのまま通す
-      statusEl.textContent = 'AR Quick Look 起動中...';
+      generateAndLoad(outerDia, length);
     });
 
-    // 「更新」ボタン
-    document.getElementById('updateBtn').addEventListener('click', updateAll);
-
-    // 入力値変化 → デバウンス更新
     let debounceId = null;
     const onInput = () => {
       const { outerDia, length } = getParams();
-      refreshPreview(outerDia, length); // Three.js は即時反映
+      refreshPreview(outerDia, length);
       clearTimeout(debounceId);
-      debounceId = setTimeout(() => generateAndCache(outerDia, length), 600);
+      debounceId = setTimeout(() => generateAndLoad(outerDia, length), 700);
     };
     document.getElementById('outerDia').addEventListener('input', onInput);
     document.getElementById('pipeLen').addEventListener('input', onInput);
 
-    // コントロールパネルのタッチが OrbitControls に漏れないよう止める
+    // コントロールパネルのタッチを Three.js OrbitControls に漏らさない
     const panel = document.getElementById('controls');
     panel.addEventListener('touchstart', e => e.stopPropagation(), { passive: false });
     panel.addEventListener('mousedown',  e => e.stopPropagation());
 
     /* ══════════════════════════════════════════════════
-       起動シーケンス
+       起動
     ══════════════════════════════════════════════════ */
     (async () => {
-      statusEl.textContent = '起動中...';
-      swReady = await registerSW();
+      await registerSW();
       await startCamera();
-
       const { outerDia, length } = getParams();
       refreshPreview(outerDia, length);
-
-      if (!swReady) {
-        statusEl.textContent = 'Service Worker 未登録 — ページを再読込してください';
-        return;
-      }
-
-      await generateAndCache(outerDia, length);
-
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-      if (!isIOS) {
-        statusEl.textContent = 'プレビュー表示中（AR は iOS Safari のみ）';
-      }
+      await generateAndLoad(outerDia, length);
     })();
   </script>
 </body>
